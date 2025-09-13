@@ -111,6 +111,37 @@ def hybrid(query: str, k_vec: int = 20, k_ft: int = 50) -> list[dict[str, Any]]:
     for r in sem:
         key = (r["table"], r["pk"])
         new_snip = (r.get("chunk") or r.get("snippet") or "")[:250]
+        # status inference
+        status = None
+        temporal = r.get("temporal") or {}
+        import datetime as _dt
+        now = _dt.datetime.utcnow()
+        # heuristics: look for start/end like fields
+        def parse_ts(val):
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
+                try:
+                    return _dt.datetime.strptime(str(val), fmt)
+                except Exception:
+                    continue
+            return None
+        starts = []
+        ends = []
+        for k,v in temporal.items():
+            lk = k.lower()
+            if any(t in lk for t in ["start","begin","from"]):
+                ts = parse_ts(v)
+                if ts: starts.append(ts)
+            if any(t in lk for t in ["end","finish","to","until"]):
+                ts = parse_ts(v)
+                if ts: ends.append(ts)
+        start_dt = starts[0] if starts else None
+        end_dt = ends[0] if ends else None
+        if start_dt and now < start_dt:
+            status = "upcoming"
+        if start_dt and end_dt and start_dt <= now <= end_dt:
+            status = "ongoing"
+        if end_dt and now > end_dt:
+            status = "completed"
         if key not in merged:
             merged[key] = {
                 "table": r["table"],
@@ -120,6 +151,8 @@ def hybrid(query: str, k_vec: int = 20, k_ft: int = 50) -> list[dict[str, Any]]:
                 "score_ft": 0.0,
                 "score_sem": r.get("score_sem", 0.0),
                 "combined_text": r.get("chunk") or r.get("snippet") or "",
+                **({"status": status} if status else {}),
+                "indexed_at": r.get("indexed_at"),
             }
         else:
             merged[key]["score_sem"] = max(merged[key]["score_sem"], r.get("score_sem", 0.0))
@@ -129,6 +162,10 @@ def hybrid(query: str, k_vec: int = 20, k_ft: int = 50) -> list[dict[str, Any]]:
                 merged[key]["snippet"] = combined[:500]
             if not merged[key].get("combined_text"):
                 merged[key]["combined_text"] = r.get("chunk") or r.get("snippet") or ""
+            if not merged[key].get("status") and status:
+                merged[key]["status"] = status
+            if not merged[key].get("indexed_at") and r.get("indexed_at"):
+                merged[key]["indexed_at"] = r.get("indexed_at")
 
     out = list(merged.values())
     out.sort(key=lambda x: 0.6 * x["score_sem"] + 0.4 * x["score_ft"], reverse=True)
