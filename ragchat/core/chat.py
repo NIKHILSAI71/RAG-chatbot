@@ -12,7 +12,13 @@ logger = logging.getLogger(__name__)
 def get_client():
     global _client
     if _client is None:
-        _client = genai.Client(api_key=settings.gemini_api_key)
+        if not settings.gemini_api_key:
+            raise ValueError("GEMINI_API_KEY environment variable is not set")
+        try:
+            _client = genai.Client(api_key=settings.gemini_api_key)
+        except Exception as e:
+            logger.error("[chat] Failed to create Gemini client: %s", e)
+            raise RuntimeError(f"Failed to initialize Gemini client: {e}")
     return _client
 
 
@@ -28,6 +34,9 @@ def chat_once(user_query: str) -> str:
     except Exception as e:
         logger.error("[chat] Retrieval failure: %s", e)
         retrieved = []
+        # If retrieval fails completely, we can still try to answer without context
+        if getattr(settings, 'debug_errors', False):
+            logger.warning("[chat] Proceeding without retrieval context due to error: %s", e)
     context_lines = []
     limit = settings.context_chars
     essentials = settings.essential_terms
@@ -51,19 +60,52 @@ def chat_once(user_query: str) -> str:
         meta_str = (" [" + ", ".join(meta_bits) + "]") if meta_bits else ""
         context_lines.append(f"- {snippet}{meta_str}")
     context_block = ("\n\nContext (most relevant records with metadata):\n" + "\n".join(context_lines)) if context_lines else ""
-    client = get_client()
+    
+    try:
+        client = get_client()
+    except Exception as e:
+        logger.error("[chat] Client initialization failed: %s", e)
+        return f"Configuration error: Unable to initialize AI client. Please check your GEMINI_API_KEY."
+    
     # Single request generation (avoids separate chat session creation latency)
     cfg = types.GenerateContentConfig(temperature=0.25, system_instruction=SYSTEM_PROMPT)
     prompt = user_query + ("\n\n" + context_block if context_block else "")
+    
     try:
+        # Try the newer API first, fall back to older if needed
+        try:
+            contents = [types.Content(parts=[types.Part.from_text(prompt)])]
+        except AttributeError:
+            # Fallback for older API version
+            contents = [types.Content(parts=[types.Part(text=prompt)])]
+        
         resp = client.models.generate_content(
             model="gemini-2.0-flash",
-            contents=[types.Content(parts=[types.Part.from_text(prompt)])] if hasattr(types.Part, 'from_text') else [types.Content(parts=[types.Part(text=prompt)])],
+            contents=contents,
             config=cfg,
         )
-        return resp.text or "No information available."
+        
+        if not resp or not hasattr(resp, 'text') or not resp.text:
+            logger.warning("[chat] Empty response from Gemini API")
+            return "I couldn't generate a response. Please try rephrasing your question."
+            
+        return resp.text
+        
     except Exception as e:
+        error_msg = str(e)
         logger.error("[chat] Generation failure: %s", e)
-        if getattr(settings, 'debug_errors', False):  # optional flag
-            return f"Temporary failure: {e}"[:500]
-        return "The system is temporarily unavailable to answer this query." 
+        
+        # Provide more specific error messages based on common issues
+        if "api key" in error_msg.lower() or "authentication" in error_msg.lower():
+            return "Authentication error: Please check your GEMINI_API_KEY configuration."
+        elif "quota" in error_msg.lower() or "limit" in error_msg.lower():
+            return "API quota exceeded. Please try again later or check your Gemini API usage limits."
+        elif "model" in error_msg.lower() and "not found" in error_msg.lower():
+            return "Model access error: The gemini-2.0-flash model may not be available. Please check your API access."
+        elif "network" in error_msg.lower() or "connection" in error_msg.lower():
+            return "Network error: Unable to connect to Gemini API. Please check your internet connection."
+        else:
+            # For debugging purposes, include the actual error in development
+            if getattr(settings, 'debug_errors', False):
+                return f"Generation error: {error_msg[:500]}"
+            return "I'm experiencing technical difficulties. Please try again in a moment." 
