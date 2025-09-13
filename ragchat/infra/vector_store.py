@@ -107,5 +107,14 @@ class VectorStore:
         if dim is None:
             return None
         vs = cls(dim)
-        vs.meta = [m for m in meta if isinstance(m, dict)]
+        import time
+        now_ts = int(time.time())
+        cleaned = []
+        for m in meta:
+            if not isinstance(m, dict):
+                continue
+            if "indexed_at" not in m:
+                m["indexed_at"] = now_ts
+            cleaned.append(m)
+        vs.meta = cleaned
         return vs
