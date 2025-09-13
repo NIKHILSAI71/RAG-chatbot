@@ -65,5 +65,6 @@ settings = Settings()
 
 if not settings.gemini_api_key:
     raise RuntimeError("GEMINI_API_KEY not set. Provide it via environment or .env file.")
+
 if not settings.mysql_db:
     raise RuntimeError("MYSQL_DB not set.")
