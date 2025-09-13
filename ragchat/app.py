@@ -12,7 +12,19 @@ from ragchat.core.chat import chat_once
 from ragchat.core.config import settings
 from ragchat.observability.metrics import init_metrics, CHAT_LATENCY_SECONDS, INDEX_UPDATE_SECONDS
 from ragchat.observability.tracing import init_tracing
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST  # type: ignore
+try:
+    # Import Prometheus client only if metrics are enabled to avoid hard dependency
+    if settings.metrics_enabled:  # type: ignore
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST  # type: ignore
+    else:
+        generate_latest = None  # type: ignore
+        CONTENT_TYPE_LATEST = None  # type: ignore
+except Exception:  # pragma: no cover
+    # If not installed, degrade gracefully; metrics endpoint will be skipped.
+    generate_latest = None  # type: ignore
+    CONTENT_TYPE_LATEST = None  # type: ignore
+    if settings.metrics_enabled:
+        print("[warn] prometheus_client not installed. Install 'prometheus-client' to enable metrics.")
 
 app = FastAPI(title="RAG + Text-to-SQL Chatbot")
 _vs: VectorStore | None = None
@@ -138,11 +150,13 @@ async def chat(req: ChatRequest):
         CHAT_LATENCY_SECONDS.observe(time.time() - start)
     return {"answer": answer}
 
-if settings.metrics_enabled:
+if settings.metrics_enabled and generate_latest:  # type: ignore
+    from fastapi.responses import Response
+
     @app.get("/metrics")
-    async def metrics():
-        data = generate_latest()
-        return FastAPI.responses.Response(content=data, media_type=CONTENT_TYPE_LATEST)  # type: ignore
+    async def metrics():  # type: ignore
+        data = generate_latest()  # type: ignore
+        return Response(content=data, media_type=CONTENT_TYPE_LATEST)  # type: ignore
 
 
 # To run: uvicorn ragchat.app:app --reload
