@@ -14,6 +14,12 @@ def get_client():
     return _client
 
 
+SYSTEM_PROMPT = (
+    "You are an assistive analytical AI. Use ONLY provided context for factual claims. "
+    "If temporal metadata (status/indexed_at) suggests upcoming/ongoing/completed events, mention that explicitly. "
+    "Synthesize details, group related facts, highlight timelines. If context is empty, say you have no information."
+)
+
 def chat_once(user_query: str) -> str:
     retrieved = hybrid_search(user_query)[: settings.context_snippets]
     context_lines = []
@@ -40,14 +46,16 @@ def chat_once(user_query: str) -> str:
         context_lines.append(f"- {snippet}{meta_str}")
     context_block = ("\n\nContext (most relevant records with metadata):\n" + "\n".join(context_lines)) if context_lines else ""
     client = get_client()
-    config = types.GenerateContentConfig(
-        system_instruction=(
-            "You are an assistive analytical AI. Use ONLY provided context for factual claims. "
-            "If temporal metadata (status/indexed_at) suggests upcoming/ongoing/completed events, mention that explicitly. "
-            "Synthesize details, group related facts, highlight timelines. If context is empty, say you have no information."
-        ),
-        temperature=0.25,
-    )
-    conv = client.chats.create(model="gemini-2.0-flash", config=config)
-    resp = conv.send_message(user_query + context_block)
-    return resp.text or "No information available."
+    # Single request generation (avoids separate chat session creation latency)
+    cfg = types.GenerateContentConfig(temperature=0.25, system_instruction=SYSTEM_PROMPT)
+    prompt = user_query + ("\n\n" + context_block if context_block else "")
+    try:
+        resp = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[types.Content(parts=[types.Part.from_text(prompt)])] if hasattr(types.Part, 'from_text') else [types.Content(parts=[types.Part(text=prompt)])],
+            config=cfg,
+        )
+        return resp.text or "No information available."
+    except Exception:
+        # Fallback minimal message rather than propagate to user
+        return "The system is temporarily unavailable to answer this query." 
