@@ -57,7 +57,21 @@ class VectorStore:
             base_id = f"{meta.get('table','unknown')}::{meta.get('pk','')}::{len(self.meta)}"
             vid = meta.get("id") or base_id
             sanitized_meta = {k: _sanitize(v) for k, v in meta.items() if k not in {"id"}}
-            upserts.append({"id": vid, "values": vec.tolist(), "metadata": sanitized_meta})
+            # Flatten nested dicts (e.g. temporal) & coerce lists to list[str]
+            flattened: dict[str, Any] = {}
+            for k, v in sanitized_meta.items():
+                if isinstance(v, dict):
+                    for sk, sv in v.items():
+                        if not isinstance(sv, (str, int, float, bool)):
+                            sv = str(sv)
+                        flattened[f"{k}_{sk}"] = sv
+                elif isinstance(v, list):
+                    # Pinecone expects list of strings; convert elements
+                    flat_list = [elem if isinstance(elem, str) else str(elem) for elem in v]
+                    flattened[k] = flat_list
+                else:
+                    flattened[k] = v
+            upserts.append({"id": vid, "values": vec.tolist(), "metadata": flattened})
             self.meta.append(meta)
         for i in range(0, len(upserts), 100):
             self.index.upsert(upserts[i:i+100])
