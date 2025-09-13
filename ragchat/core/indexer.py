@@ -84,9 +84,9 @@ def fetch_rows_all_text_columns(table: str, limit: int) -> Iterable[dict]:
                 parts.append(sval)
         if not parts:
             continue
-    # include raw column values for temporal/status enrichment
-    raw_cols = {c: row.get(c) for c in (text_cols + temporal_only)}
-    yield {"pk": pk_val, "text": " \n ".join(parts), "table": table, "column": "*", "raw_cols": raw_cols}
+        # include raw column values for temporal/status enrichment (per-row)
+        raw_cols = {c: row.get(c) for c in (text_cols + temporal_only)}
+        yield {"pk": pk_val, "text": " \n ".join(parts), "table": table, "column": "*", "raw_cols": raw_cols}
 
 
 def resolve_index_columns() -> list[str]:
