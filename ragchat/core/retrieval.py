@@ -3,6 +3,7 @@ from typing import Any
 from ragchat.core.db import connection, fetch_schema, get_primary_key
 from ragchat.core.config import settings
 from ragchat.core.embeddings import embed_query
+from concurrent.futures import ThreadPoolExecutor
 from ragchat.infra.vector_store import VectorStore
 
 # VectorStore instance injected at runtime
@@ -91,9 +92,17 @@ def fulltext_search(query: str, limit: int = 50) -> list[dict[str, Any]]:
 def hybrid(query: str, k_vec: int = 20, k_ft: int = 50) -> list[dict[str, Any]]:
     if _vs is None:
         return []
-    ft = fulltext_search(query, k_ft)
-    qv = embed_query(query)
-    sem = _vs.search(qv, k=k_vec)
+
+    def _sem():
+        qv_local = embed_query(query)
+        return _vs.search(qv_local, k=k_vec)
+
+    # Run DB fulltext and embedding+vector search concurrently to hide network latency
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fut_ft = ex.submit(fulltext_search, query, k_ft)
+        fut_sem = ex.submit(_sem)
+        ft = fut_ft.result()
+        sem = fut_sem.result()
 
     merged: dict[tuple, dict[str, Any]] = {}
 
