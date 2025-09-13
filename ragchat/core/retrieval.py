@@ -115,12 +115,33 @@ def hybrid(query: str, k_vec: int = 20, k_ft: int = 50) -> list[dict[str, Any]]:
         status = None
         temporal = r.get("temporal") or {}
         import datetime as _dt
-        now = _dt.datetime.utcnow()
+        try:
+            from zoneinfo import ZoneInfo  # Python 3.9+
+            tz = ZoneInfo(getattr(settings, 'status_timezone', 'UTC') or 'UTC')
+        except Exception:
+            tz = _dt.timezone.utc
+        now = _dt.datetime.now(tz)
         # heuristics: look for start/end like fields
         def parse_ts(val):
+            raw = str(val).strip()
+            if not raw:
+                return None
+            # Attempt fromisoformat first (handles offsets)
+            try:
+                dt = _dt.datetime.fromisoformat(raw)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=tz)
+                else:
+                    # convert to target tz for comparison
+                    dt = dt.astimezone(tz)
+                return dt
+            except Exception:
+                pass
             for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
                 try:
-                    return _dt.datetime.strptime(str(val), fmt)
+                    dt = _dt.datetime.strptime(raw, fmt)
+                    dt = dt.replace(tzinfo=tz)
+                    return dt
                 except Exception:
                     continue
             return None
