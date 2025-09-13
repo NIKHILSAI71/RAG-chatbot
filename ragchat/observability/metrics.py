@@ -1,7 +1,21 @@
 from __future__ import annotations
 import time
 from typing import Callable, Any
-from prometheus_client import Counter, Gauge, Histogram
+try:
+    from prometheus_client import Counter, Gauge, Histogram  # type: ignore
+except Exception:  # pragma: no cover
+    class _Noop:
+        def __init__(self, *a, **k):
+            pass
+        def labels(self, *a, **k):
+            return self
+        def set(self, *a, **k):
+            return self
+        def inc(self, *a, **k):
+            return self
+        def observe(self, *a, **k):
+            return self
+    Counter = Gauge = Histogram = _Noop  # type: ignore
 import json
 import os
 from ragchat.core.config import settings
@@ -24,6 +38,17 @@ VECTOR_SEARCH_ERRORS: Counter
 CB_OPEN: Gauge
 CHAT_LATENCY_SECONDS: Histogram
 INDEX_UPDATE_SECONDS: Histogram
+
+# Provide placeholder assignments so symbols exist for from-import callers
+EMBED_CACHE_HIT = None  # type: ignore
+EMBED_CACHE_MISS = None  # type: ignore
+EMBED_BATCH_SECONDS = None  # type: ignore
+EMBED_ERRORS = None  # type: ignore
+VECTOR_SEARCH_SECONDS = None  # type: ignore
+VECTOR_SEARCH_ERRORS = None  # type: ignore
+CB_OPEN = None  # type: ignore
+CHAT_LATENCY_SECONDS = None  # type: ignore
+INDEX_UPDATE_SECONDS = None  # type: ignore
 
 # Circuit breaker state (shared for embeddings and search but keyed by name)
 _cb_state: dict[str, dict[str, Any]] = {}
