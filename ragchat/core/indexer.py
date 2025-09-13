@@ -5,6 +5,7 @@ import re
 from ragchat.core.config import settings
 from ragchat.core.db import connection, fetch_schema, get_primary_key
 from ragchat.core.embeddings import embed_texts
+import time
 from ragchat.infra.vector_store import VectorStore
 
 CHUNK_CHARS = settings.chunk_chars if getattr(settings, 'chunk_chars', None) else 1200
@@ -57,7 +58,11 @@ def fetch_rows_all_text_columns(table: str, limit: int) -> Iterable[dict]:
     if not text_cols:
         return []
     pk = get_primary_key(table)
-    select_cols = ", ".join([pk] + text_cols)
+    # Extend with temporal columns (even if not text) for status inference
+    schema_cols = schema.get(table, [])
+    temporal_types = {"date", "datetime", "timestamp", "time", "year"}
+    temporal_only = [c["name"] for c in schema_cols if c["type"].lower() in temporal_types and c["name"] not in text_cols]
+    select_cols = ", ".join([pk] + text_cols + temporal_only) if temporal_only else ", ".join([pk] + text_cols)
     with connection() as conn:
         cur = conn.cursor(dictionary=True)
         cur.execute(f"SELECT {select_cols} FROM {table} LIMIT %s", (limit,))
@@ -79,7 +84,9 @@ def fetch_rows_all_text_columns(table: str, limit: int) -> Iterable[dict]:
                 parts.append(sval)
         if not parts:
             continue
-        yield {"pk": pk_val, "text": " \n ".join(parts), "table": table, "column": "*"}
+    # include raw column values for temporal/status enrichment
+    raw_cols = {c: row.get(c) for c in (text_cols + temporal_only)}
+    yield {"pk": pk_val, "text": " \n ".join(parts), "table": table, "column": "*", "raw_cols": raw_cols}
 
 
 def resolve_index_columns() -> list[str]:
@@ -121,6 +128,9 @@ def build_index(vs: VectorStore | None = None) -> VectorStore:
     metas: list[dict[str, Any]] = []
     columns_specs = resolve_index_columns()
     tables_seen: set[str] = set()
+    now_ts = int(time.time())
+    schema = fetch_schema()
+    datetime_types = {"date", "datetime", "timestamp", "time", "year"}
     for spec in columns_specs:
         if not spec or "." not in spec:
             continue
@@ -133,7 +143,20 @@ def build_index(vs: VectorStore | None = None) -> VectorStore:
                     if len(ch) < settings.min_chunk_chars:
                         continue
                     texts.append(ch)
-                    metas.append({"table": row["table"], "pk": row["pk"], "column": row["column"], "chunk": ch})
+                    # capture temporal columns for table (first row basis)
+                    temporal_meta = {}
+                    cols_meta = schema.get(row["table"], [])
+                    for c in cols_meta:
+                        if c["type"].lower() in datetime_types and c["name"] in row.get("raw_cols", {}):
+                            temporal_meta[c["name"]] = row["raw_cols"][c["name"]]
+                    metas.append({
+                        "table": row["table"],
+                        "pk": row["pk"],
+                        "column": row["column"],
+                        "chunk": ch,
+                        "indexed_at": now_ts,
+                        **({"temporal": temporal_meta} if temporal_meta else {})
+                    })
             tables_seen.add(table)
         else:
             for row in fetch_rows(table, col, settings.index_row_limit):
@@ -141,7 +164,19 @@ def build_index(vs: VectorStore | None = None) -> VectorStore:
                     if len(ch) < settings.min_chunk_chars:
                         continue
                     texts.append(ch)
-                    metas.append({"table": row["table"], "pk": row["pk"], "column": row["column"], "chunk": ch})
+                    temporal_meta = {}
+                    cols_meta = schema.get(row["table"], [])
+                    for c in cols_meta:
+                        if c["type"].lower() in datetime_types and c["name"] in row.get("raw_cols", {}):
+                            temporal_meta[c["name"]] = row["raw_cols"][c["name"]]
+                    metas.append({
+                        "table": row["table"],
+                        "pk": row["pk"],
+                        "column": row["column"],
+                        "chunk": ch,
+                        "indexed_at": now_ts,
+                        **({"temporal": temporal_meta} if temporal_meta else {})
+                    })
     if not texts:
         raise RuntimeError("No texts collected for indexing.")
     vectors = embed_texts(texts)
@@ -238,13 +273,21 @@ def incremental_update(vs: VectorStore, tables: list[str] | None = None) -> dict
                 if len(ch) < settings.min_chunk_chars:
                     continue
                 row_texts.append(ch)
+                # temporal capture
+                temporal_meta = {}
+                cols_meta = fetch_schema().get(table, [])
+                for c in cols_meta:
+                    if c["type"].lower() in {"date","datetime","timestamp","time","year"} and c["name"] in row.get("raw_cols", {}):
+                        temporal_meta[c["name"]] = row["raw_cols"][c["name"]]
                 row_metas.append({
                     "table": table,
                     "pk": pk,
                     "column": row["column"],
                     "chunk": ch,
+                    "indexed_at": int(time.time()),
                     # deterministic id
                     "id": f"{table}::{pk}::{chunk_idx}",
+                    **({"temporal": temporal_meta} if temporal_meta else {})
                 })
                 chunk_idx += 1
             if not row_texts:
