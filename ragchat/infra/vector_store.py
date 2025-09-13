@@ -57,20 +57,40 @@ class VectorStore:
             base_id = f"{meta.get('table','unknown')}::{meta.get('pk','')}::{len(self.meta)}"
             vid = meta.get("id") or base_id
             sanitized_meta = {k: _sanitize(v) for k, v in meta.items() if k not in {"id"}}
-            # Flatten nested dicts (e.g. temporal) & coerce lists to list[str]
+            # Flatten & coerce metadata recursively so every final value is one of:
+            # str | int | float | bool | list[str]
+            from collections.abc import Mapping
+
+            def _flatten(prefix: str, value: Any, out: dict[str, Any]):
+                # Expand mappings (dict / pydantic BaseModel .dict())
+                if isinstance(value, Mapping):
+                    for sk, sv in value.items():
+                        new_key = f"{prefix}_{sk}" if prefix else str(sk)
+                        _flatten(new_key, sv, out)
+                elif isinstance(value, list):
+                    # Coerce list elements to strings (Pinecone only supports list[str])
+                    out[prefix] = [e if isinstance(e, str) else str(e) for e in value]
+                else:
+                    # Primitive or unsupported -> coerce to primitive
+                    if isinstance(value, (str, int, float, bool)):
+                        out[prefix] = value
+                    else:
+                        out[prefix] = str(value)
+
             flattened: dict[str, Any] = {}
             for k, v in sanitized_meta.items():
-                if isinstance(v, dict):
-                    for sk, sv in v.items():
-                        if not isinstance(sv, (str, int, float, bool)):
-                            sv = str(sv)
-                        flattened[f"{k}_{sk}"] = sv
-                elif isinstance(v, list):
-                    # Pinecone expects list of strings; convert elements
-                    flat_list = [elem if isinstance(elem, str) else str(elem) for elem in v]
-                    flattened[k] = flat_list
+                _flatten(k, v, flattened)
+
+            # Final safety pass: ensure constraints
+            safe_meta: dict[str, Any] = {}
+            for k, v in flattened.items():
+                if isinstance(v, list):
+                    safe_meta[k] = [e if isinstance(e, str) else str(e) for e in v]
+                elif isinstance(v, (str, int, float, bool)):
+                    safe_meta[k] = v
                 else:
-                    flattened[k] = v
+                    safe_meta[k] = str(v)
+            flattened = safe_meta
             upserts.append({"id": vid, "values": vec.tolist(), "metadata": flattened})
             self.meta.append(meta)
         for i in range(0, len(upserts), 100):
