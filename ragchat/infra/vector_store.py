@@ -89,8 +89,26 @@ class VectorStore:
         return out
 
     def save(self):
+        def _sanitize(val):
+            from datetime import datetime, date, time as dtime, timedelta
+            if isinstance(val, (datetime, date, dtime)):
+                # ISO 8601 string representation
+                return val.isoformat()
+            if isinstance(val, timedelta):
+                # Represent as HH:MM:SS (floor to seconds)
+                total_seconds = int(val.total_seconds())
+                h = total_seconds // 3600
+                m = (total_seconds % 3600) // 60
+                s = total_seconds % 60
+                return f"{h:02d}:{m:02d}:{s:02d}"
+            if isinstance(val, dict):
+                return {k: _sanitize(v) for k, v in val.items()}
+            if isinstance(val, list):
+                return [_sanitize(v) for v in val]
+            return val
+        cleaned = [_sanitize(m) for m in self.meta]
         with open(META_PATH, "w", encoding="utf-8") as f:
-            json.dump(self.meta, f)
+            json.dump(cleaned, f)
 
     @classmethod
     def load(cls) -> "VectorStore | None":
