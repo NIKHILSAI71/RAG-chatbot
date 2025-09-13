@@ -6,8 +6,10 @@ from ragchat.core.config import settings
 
 try:
     from mysql.connector import pooling, Error  # type: ignore
+    import mysql.connector as mysql_connector  # type: ignore
 except Exception:  # pragma: no cover - optional dependency when not using mysql
     pooling = None  # type: ignore
+    mysql_connector = None  # type: ignore
     class Error(Exception):
         pass
 
@@ -42,15 +44,44 @@ class MySQLDataSource:
             raise RuntimeError("mysql-connector not installed; required for MySQL datasource")
         with self._pool_lock:
             if self._pool is None:
-                self._pool = pooling.MySQLConnectionPool(
-                    pool_name="rag_pool",
-                    pool_size=max_size,
-                    host=settings.mysql_host,
-                    user=settings.mysql_user,
-                    password=settings.mysql_password,
-                    database=settings.mysql_db,
-                    autocommit=True,
-                )
+                try:
+                    self._pool = pooling.MySQLConnectionPool(
+                        pool_name="rag_pool",
+                        pool_size=max_size,
+                        host=settings.mysql_host,
+                        user=settings.mysql_user,
+                        password=settings.mysql_password,
+                        database=settings.mysql_db,
+                        autocommit=True,
+                    )
+                except Error as e:  # type: ignore
+                    # 1049 = Unknown database
+                    if getattr(e, 'errno', None) == 1049 and mysql_connector is not None:
+                        try:
+                            tmp_conn = mysql_connector.connect(
+                                host=settings.mysql_host,
+                                user=settings.mysql_user,
+                                password=settings.mysql_password,
+                            )
+                            cur = tmp_conn.cursor()
+                            cur.execute(f"CREATE DATABASE IF NOT EXISTS `{settings.mysql_db}` DEFAULT CHARACTER SET utf8mb4")
+                            cur.close()
+                            tmp_conn.close()
+                            # retry pool creation
+                            self._pool = pooling.MySQLConnectionPool(
+                                pool_name="rag_pool",
+                                pool_size=max_size,
+                                host=settings.mysql_host,
+                                user=settings.mysql_user,
+                                password=settings.mysql_password,
+                                database=settings.mysql_db,
+                                autocommit=True,
+                            )
+                            print(f"[db] Created missing database '{settings.mysql_db}'.")
+                        except Exception as ce:
+                            raise RuntimeError(f"Failed to create database '{settings.mysql_db}': {ce}") from ce
+                    else:
+                        raise
         return self._pool
 
     def _get_conn(self):
