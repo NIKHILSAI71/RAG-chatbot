@@ -3,6 +3,7 @@ from typing import Any
 import logging
 from google import genai
 from google.genai import types
+from ragchat.core.content_utils import build_content
 from ragchat.core.config import settings
 from ragchat.core.retrieval import hybrid as hybrid_search
 
@@ -75,13 +76,7 @@ def chat_once(user_query: str) -> str:
     prompt = user_query + ("\n\n" + context_block if context_block else "")
     
     try:
-        # Try the newer API first, fall back to older if needed
-        try:
-            contents = [types.Content(parts=[types.Part.from_text(prompt)])]
-        except AttributeError:
-            # Fallback for older API version
-            contents = [types.Content(parts=[types.Part(text=prompt)])]
-        
+        contents = [build_content(prompt)]
         resp = client.models.generate_content(
             model="gemini-2.0-flash",
             contents=contents,
