@@ -6,6 +6,7 @@ import threading
 import numpy as np
 from google import genai
 from google.genai import types
+from ragchat.core.content_utils import build_contents
 from ragchat.core.config import settings
 from ragchat.observability.metrics import init_metrics, EMBED_CACHE_HIT, EMBED_CACHE_MISS, EMBED_BATCH_SECONDS, EMBED_ERRORS, with_circuit_breaker
 
@@ -35,11 +36,7 @@ def embed_texts(texts: list[str]) -> list[np.ndarray]:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def process(batch_items: List[Tuple[int, str]]):
-        contents = [
-            types.Content(parts=[types.Part.from_text(text=t)]) if hasattr(types.Part, 'from_text')
-            else types.Content(parts=[types.Part(text=t)])
-            for _, t in batch_items
-        ]
+        contents = build_contents([t for _, t in batch_items])
         start = time.time()
         def call():
             return client.models.embed_content(
