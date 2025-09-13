@@ -37,15 +37,27 @@ class VectorStore:
         arr = np.vstack(vectors).astype("float32")
         norms = np.linalg.norm(arr, axis=1, keepdims=True) + 1e-12
         arr = arr / norms
+        def _sanitize(val):
+            from datetime import datetime, date, time as dtime, timedelta
+            if isinstance(val, (datetime, date, dtime)):
+                return val.isoformat()
+            if isinstance(val, timedelta):
+                total_seconds = int(val.total_seconds())
+                h = total_seconds // 3600
+                m = (total_seconds % 3600) // 60
+                s = total_seconds % 60
+                return f"{h:02d}:{m:02d}:{s:02d}"
+            if isinstance(val, dict):
+                return {k: _sanitize(v) for k, v in val.items()}
+            if isinstance(val, list):
+                return [_sanitize(v) for v in val]
+            return val
         upserts = []
         for vec, meta in zip(arr, metas):
             base_id = f"{meta.get('table','unknown')}::{meta.get('pk','')}::{len(self.meta)}"
             vid = meta.get("id") or base_id
-            upserts.append({
-                "id": vid,
-                "values": vec.tolist(),
-                "metadata": {k: v for k, v in meta.items() if k not in {"id"}},
-            })
+            sanitized_meta = {k: _sanitize(v) for k, v in meta.items() if k not in {"id"}}
+            upserts.append({"id": vid, "values": vec.tolist(), "metadata": sanitized_meta})
             self.meta.append(meta)
         for i in range(0, len(upserts), 100):
             self.index.upsert(upserts[i:i+100])
