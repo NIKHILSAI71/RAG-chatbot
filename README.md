@@ -57,6 +57,8 @@ PINECONE_API_KEY=...
 PINECONE_INDEX=ragchat-index
 PINECONE_CLOUD=aws
 PINECONE_REGION=us-east-1
+# Time zone used for event status inference (IANA name)
+STATUS_TIMEZONE=UTC
 ```
 If `FULLTEXT_REQUIRED=true`, ensure FULLTEXT indexes exist for the columns you want lexical retrieval on, e.g.:
 ```sql
@@ -120,6 +122,7 @@ TRACING_ENABLED=false        # Enable OpenTelemetry tracing
 OTLP_ENDPOINT=               # Collector endpoint (http(s)://host:4318)
 SERVICE_NAME=ragchat         # Resource service.name
 TRACE_SAMPLE_RATIO=0.1       # Sampling ratio (0-1)
+STATUS_TIMEZONE=UTC          # IANA tz name for temporal status (upcoming/ongoing/completed)
 ```
 
 ## Health Endpoint
