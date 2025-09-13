@@ -31,11 +31,21 @@ def chat_once(user_query: str) -> str:
             if idx != -1 and idx + len(term) > max_needed:
                 max_needed = min(max(idx + len(term) + 40, max_needed), min(len(raw), limit * 2))
         snippet = raw[:max_needed]
-        context_lines.append(f"- {snippet}")
-    context_block = ("\n\nContext:\n" + "\n".join(context_lines)) if context_lines else ""
+        meta_bits = []
+        if r.get("table"): meta_bits.append(f"table={r['table']}")
+        if r.get("pk") is not None: meta_bits.append(f"pk={r['pk']}")
+        if r.get("status"): meta_bits.append(f"status={r['status']}")
+        if r.get("indexed_at"): meta_bits.append(f"indexed_at={r['indexed_at']}")
+        meta_str = (" [" + ", ".join(meta_bits) + "]") if meta_bits else ""
+        context_lines.append(f"- {snippet}{meta_str}")
+    context_block = ("\n\nContext (most relevant records with metadata):\n" + "\n".join(context_lines)) if context_lines else ""
     client = get_client()
     config = types.GenerateContentConfig(
-        system_instruction="Answer using the context if relevant. If context is empty, say you have no information.",
+        system_instruction=(
+            "You are an assistive analytical AI. Use ONLY provided context for factual claims. "
+            "If temporal metadata (status/indexed_at) suggests upcoming/ongoing/completed events, mention that explicitly. "
+            "Synthesize details, group related facts, highlight timelines. If context is empty, say you have no information."
+        ),
         temperature=0.25,
     )
     conv = client.chats.create(model="gemini-2.0-flash", config=config)
