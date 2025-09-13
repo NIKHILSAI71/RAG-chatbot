@@ -60,6 +60,8 @@ class Settings:
     otlp_endpoint: str = os.getenv("OTLP_ENDPOINT", "")
     service_name: str = os.getenv("SERVICE_NAME", "ragchat")
     trace_sample_ratio: float = float(os.getenv("TRACE_SAMPLE_RATIO", "0.1"))
+    # Time zone for temporal status inference (IANA name, e.g. 'UTC', 'America/New_York')
+    status_timezone: str = os.getenv("STATUS_TIMEZONE", "UTC")
 
 settings = Settings()
 
