@@ -3,6 +3,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from threading import Event, Thread
 import time
+import logging
+import sys
 from ragchat.core.db import init_pool, fetch_schema, schema_cache_age_seconds
 from ragchat.infra.vector_store import VectorStore
 from ragchat.core.indexer import build_index, incremental_update
@@ -12,6 +14,26 @@ from ragchat.core.chat import chat_once
 from ragchat.core.config import settings
 from ragchat.observability.metrics import init_metrics, CHAT_LATENCY_SECONDS, INDEX_UPDATE_SECONDS
 from ragchat.observability.tracing import init_tracing
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('ragchat.log', mode='a')
+    ]
+)
+
+# Set specific loggers
+logger = logging.getLogger(__name__)
+logging.getLogger("ragchat.core.chat").setLevel(logging.INFO)
+logging.getLogger("ragchat.core.retrieval").setLevel(logging.INFO)
+logging.getLogger("ragchat.infra.vector_store").setLevel(logging.INFO)
+
+# Reduce noise from other libraries
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 try:
     # Import Prometheus client only if metrics are enabled to avoid hard dependency
     if settings.metrics_enabled:  # type: ignore
@@ -24,9 +46,9 @@ except Exception:  # pragma: no cover
     generate_latest = None  # type: ignore
     CONTENT_TYPE_LATEST = None  # type: ignore
     if settings.metrics_enabled:
-        print("[warn] prometheus_client not installed. Install 'prometheus-client' to enable metrics.")
+        logger.warning("prometheus_client not installed. Install 'prometheus-client' to enable metrics.")
 
-app = FastAPI(title="RAG + Text-to-SQL Chatbot")
+app = FastAPI(title="RAG - Chatbot")
 _vs: VectorStore | None = None
 _index_worker_stop: Event | None = None
 _index_worker_thread: Thread | None = None
@@ -58,41 +80,44 @@ class IndexWorker:
                 global _last_index_stats
                 _last_index_stats = stats | {"timestamp": time.time()}
                 if stats.get("added_vectors", 0) or stats.get("reembedded_rows", 0):
-                    # ensure retrieval layer sees latest metadata
-                    set_vector_store(self.vs)
-                # lightweight logging
-                print(f"[index_worker] incremental_update: {stats}")
-            except Exception as e:
-                print(f"[index_worker] error during incremental update: {e}")
-            # wait with early exit
-            self._stop.wait(self.interval)
-
-    def stop(self):
+                # ensure retrieval layer sees latest metadata
+                set_vector_store(self.vs)
+            # Log incremental update results
+            logger.info(f"[index_worker] incremental_update: {stats}")
+        except Exception as e:
+            logger.error(f"[index_worker] error during incremental update: {e}")
+        # wait with early exit
+        self._stop.wait(self.interval)    def stop(self):
         self._stop.set()
 
 
 @app.on_event("startup")
 async def startup_event():
     global _vs, _index_worker_stop, _index_worker_thread
+    logger.info("Starting RAG chatbot application...")
     init_pool()
     existing = VectorStore.load()
     if existing:
         _vs = existing
         set_vector_store(_vs)
+        logger.info("Loaded existing vector store with %d vectors", len(_vs.meta))
     else:
         # Build index on first run if enabled
         if settings.auto_index and settings.auto_index_initial_build:
             try:
+                logger.info("Building initial index...")
                 _vs = build_index(None)
                 set_vector_store(_vs)
+                logger.info("Initial index built successfully")
             except Exception as e:
-                print(f"[startup] Initial build failed: {e}")
+                logger.error(f"[startup] Initial build failed: {e}")
     # Start background worker if enabled and vector store is available
     if settings.auto_index and _vs is not None:
         worker = IndexWorker(_vs, interval=settings.auto_index_interval)
         _index_worker_thread = Thread(target=worker.run, daemon=True)
         _index_worker_stop = worker
         _index_worker_thread.start()
+        logger.info("Started background index worker")
     # Pre-warm schema & text column caches to reduce first-request latency
     try:
         # Tracing init
@@ -108,22 +133,27 @@ async def startup_event():
                 try:
                     embed_query(q)
                 except Exception as e:
-                    print(f"[startup] Prewarm failed for '{q}': {e}")
+                    logger.warning(f"[startup] Prewarm failed for '{q}': {e}")
+        logger.info("Application startup completed successfully")
     except Exception as e:
-        print(f"[startup] Cache pre-warm failed: {e}")
+        logger.error(f"[startup] Cache pre-warm failed: {e}")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     global _index_worker_stop, _index_worker_thread
+    logger.info("Shutting down RAG chatbot application...")
     if _index_worker_stop:
         try:
             _index_worker_stop.stop()
-        except Exception:
-            pass
+            logger.info("Stopped background index worker")
+        except Exception as e:
+            logger.error(f"Error stopping index worker: {e}")
     if _index_worker_thread:
         # give thread a moment to exit
         _index_worker_thread.join(timeout=2)
+        logger.info("Index worker thread shutdown completed")
+    logger.info("Application shutdown completed")
 
 
 @app.get("/health")
@@ -143,11 +173,18 @@ async def health():
 @app.post("/chat")
 async def chat(req: ChatRequest):
     if not req.query.strip():
+        logger.warning("Received empty chat query")
         raise HTTPException(400, "Query required")
+    
+    logger.info(f"Processing chat query: {req.query[:100]}...")  # Log first 100 chars
     start = time.time()
     answer = chat_once(req.query)
+    duration = time.time() - start
+    
     if settings.metrics_enabled:
-        CHAT_LATENCY_SECONDS.observe(time.time() - start)
+        CHAT_LATENCY_SECONDS.observe(duration)
+    
+    logger.info(f"Chat query completed in {duration:.2f}s")
     return {"answer": answer}
 
 if settings.metrics_enabled and generate_latest:  # type: ignore
