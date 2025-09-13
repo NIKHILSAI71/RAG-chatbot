@@ -62,6 +62,8 @@ class Settings:
     trace_sample_ratio: float = float(os.getenv("TRACE_SAMPLE_RATIO", "0.1"))
     # Time zone for temporal status inference (IANA name, e.g. 'UTC', 'America/New_York')
     status_timezone: str = os.getenv("STATUS_TIMEZONE", "UTC")
+    # Return verbose errors to user (for debugging only; do not enable in prod)
+    debug_errors: bool = os.getenv("DEBUG_ERRORS", "false").lower() in {"1","true","yes"}
 
 settings = Settings()
 
