@@ -80,14 +80,16 @@ class IndexWorker:
                 global _last_index_stats
                 _last_index_stats = stats | {"timestamp": time.time()}
                 if stats.get("added_vectors", 0) or stats.get("reembedded_rows", 0):
-                # ensure retrieval layer sees latest metadata
-                set_vector_store(self.vs)
-            # Log incremental update results
-            logger.info(f"[index_worker] incremental_update: {stats}")
-        except Exception as e:
-            logger.error(f"[index_worker] error during incremental update: {e}")
-        # wait with early exit
-        self._stop.wait(self.interval)    def stop(self):
+                    # ensure retrieval layer sees latest metadata
+                    set_vector_store(self.vs)
+                # Log incremental update results
+                logger.info(f"[index_worker] incremental_update: {stats}")
+            except Exception as e:
+                logger.error(f"[index_worker] error during incremental update: {e}")
+            # wait with early exit
+            self._stop.wait(self.interval)
+
+    def stop(self):
         self._stop.set()
 
 
