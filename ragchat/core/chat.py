@@ -29,8 +29,10 @@ SYSTEM_PROMPT = (
 )
 
 def chat_once(user_query: str) -> str:
+    logger.info(f"Starting chat processing for query: {user_query[:50]}...")
     try:
         retrieved = hybrid_search(user_query)[: settings.context_snippets]
+        logger.info(f"Retrieved {len(retrieved)} context snippets")
     except Exception as e:
         logger.error("[chat] Retrieval failure: %s", e)
         retrieved = []
@@ -63,6 +65,7 @@ def chat_once(user_query: str) -> str:
     
     try:
         client = get_client()
+        logger.debug("Gemini client initialized successfully")
     except Exception as e:
         logger.error("[chat] Client initialization failed: %s", e)
         return f"Configuration error: Unable to initialize AI client. Please check your GEMINI_API_KEY."
@@ -89,6 +92,7 @@ def chat_once(user_query: str) -> str:
             logger.warning("[chat] Empty response from Gemini API")
             return "I couldn't generate a response. Please try rephrasing your question."
             
+        logger.info(f"Successfully generated response of {len(resp.text)} characters")
         return resp.text
         
     except Exception as e:
