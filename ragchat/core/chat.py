@@ -1,11 +1,13 @@
 from __future__ import annotations
 from typing import Any
+import logging
 from google import genai
 from google.genai import types
 from ragchat.core.config import settings
 from ragchat.core.retrieval import hybrid as hybrid_search
 
 _client: genai.Client | None = None
+logger = logging.getLogger(__name__)
 
 def get_client():
     global _client
@@ -21,7 +23,11 @@ SYSTEM_PROMPT = (
 )
 
 def chat_once(user_query: str) -> str:
-    retrieved = hybrid_search(user_query)[: settings.context_snippets]
+    try:
+        retrieved = hybrid_search(user_query)[: settings.context_snippets]
+    except Exception as e:
+        logger.error("[chat] Retrieval failure: %s", e)
+        retrieved = []
     context_lines = []
     limit = settings.context_chars
     essentials = settings.essential_terms
@@ -56,6 +62,8 @@ def chat_once(user_query: str) -> str:
             config=cfg,
         )
         return resp.text or "No information available."
-    except Exception:
-        # Fallback minimal message rather than propagate to user
+    except Exception as e:
+        logger.error("[chat] Generation failure: %s", e)
+        if getattr(settings, 'debug_errors', False):  # optional flag
+            return f"Temporary failure: {e}"[:500]
         return "The system is temporarily unavailable to answer this query." 
