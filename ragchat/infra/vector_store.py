@@ -26,6 +26,8 @@ class VectorStore:
             )
         self.index = self.pc.Index(settings.pinecone_index)
         self.meta: list[dict[str, Any]] = []
+        # Lightweight flag to avoid repeated expensive stats calls
+        self._checked_consistency = False
 
     @staticmethod
     def _ensure_dir():
@@ -181,4 +183,23 @@ class VectorStore:
                 m["indexed_at"] = now_ts
             cleaned.append(m)
         vs.meta = cleaned
+        # Consistency check: if we have metadata but the remote index is empty (e.g. index wiped)
+        # clear meta so that the next incremental_update / build triggers full re-embed.
+        try:
+            if vs.meta:
+                stats = vs.index.describe_index_stats()
+                # Pinecone serverless returns dict with total vector count nested; support common shapes.
+                total = None
+                if isinstance(stats, dict):
+                    # Newer SDK: {'namespaces': {...}, 'dimension': 1536, 'index_fullness': 0.0, 'total_vector_count': 0}
+                    total = stats.get("total_vector_count")
+                    if total is None and "namespaces" in stats:
+                        # Sum namespace counts if present
+                        ns = stats.get("namespaces") or {}
+                        total = sum((ns.get(k, {}).get("vector_count", 0) for k in ns))
+                if total == 0:
+                    print("[vector_store] Detected metadata without vectors in Pinecone; scheduling full re-embed.")
+                    vs.meta = []
+        except Exception as e:  # pragma: no cover - defensive
+            print(f"[vector_store] Consistency check failed: {e}")
         return vs
