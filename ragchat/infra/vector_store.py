@@ -4,6 +4,7 @@ import os
 import time
 import logging
 from typing import Any, Iterable
+import hashlib
 import numpy as np
 from pinecone import Pinecone, ServerlessSpec
 from ragchat.core.config import settings
@@ -82,12 +83,22 @@ class VectorStore:
         arr = arr / norms
         upserts = []
         for vec, meta in zip(arr, metas):
-            base_id = f"{meta.get('table','unknown')}::{meta.get('pk','')}::{len(self.meta)}"
-            vid = meta.get("id") or base_id
+            # Prefer provided deterministic ID; fallback to stable hash of chunk
+            if meta.get("id"):
+                vid = meta["id"]
+            else:
+                chunk_text = str(meta.get("chunk", ""))
+                h = hashlib.sha1(chunk_text.encode("utf-8", errors="ignore")).hexdigest()[:16]
+                vid = f"{meta.get('table','unknown')}::{meta.get('pk','')}::{h}"
             sanitized_meta = {k: self._sanitize_value(v) for k, v in meta.items() if k not in {"id"}}
             flattened = self._flatten_metadata(sanitized_meta)
             upserts.append({"id": vid, "values": vec.tolist(), "metadata": flattened})
-            self.meta.append(meta)
+            # Keep local metadata unique by deterministic ID to avoid duplicate counts
+            if meta.get("id"):
+                mid = meta["id"]
+                if self.meta:
+                    self.meta = [m for m in self.meta if m.get("id") != mid]
+            self.meta.append(meta | {"id": vid})
         for i in range(0, len(upserts), 100):
             batch = upserts[i:i+100]
             try:
@@ -147,9 +158,10 @@ class VectorStore:
 
     def save(self):
         cleaned = [self._sanitize_value(m) for m in self.meta]
+        payload = {"dim": self.dim, "meta": cleaned}
         try:
             with open(META_PATH, "w", encoding="utf-8") as f:
-                json.dump(cleaned, f)
+                json.dump(payload, f)
         except Exception as e:  # pragma: no cover - defensive
             logger.error("[vector_store] Failed to save metadata: %s", e)
 
@@ -158,18 +170,29 @@ class VectorStore:
         if not settings.pinecone_api_key:
             return None
         meta: list[Any] = []
+        dim_from_file: int | None = None
         if os.path.exists(META_PATH):
             try:
                 with open(META_PATH, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
+                    content = json.load(f)
+                    if isinstance(content, dict):
+                        dim_from_file = int(content.get("dim")) if content.get("dim") is not None else None
+                        meta = content.get("meta") or []
+                    else:
+                        # Backward compatibility: older format stored raw list
+                        meta = content
             except Exception as e:  # pragma: no cover - defensive
                 logger.warning("[vector_store] Failed to load metadata file: %s", e)
                 meta = []
-        dim = settings.embed_dim or (
-            len(meta[0].get("vector", []))
-            if meta and isinstance(meta[0], dict) and meta[0].get("vector")
-            else None
-        )
+        dim = dim_from_file or settings.embed_dim
+        if dim is None and settings.pinecone_api_key and settings.pinecone_index:
+            try:
+                pc = Pinecone(api_key=settings.pinecone_api_key)
+                desc = pc.describe_index(name=settings.pinecone_index)
+                if isinstance(desc, dict):
+                    dim = desc.get("dimension") or (desc.get("spec", {}) or {}).get("dimension")
+            except Exception as e:  # pragma: no cover - network variability
+                logger.debug("[vector_store] Could not infer dim from Pinecone: %s", e)
         if dim is None:
             return None
         vs = cls(dim)
