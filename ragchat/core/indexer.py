@@ -92,6 +92,8 @@ def fetch_rows_all_text_columns(table: str, limit: int) -> Iterable[dict]:
 def resolve_index_columns() -> list[str]:
     raw = [r.strip() for r in settings.index_columns if r.strip()]
     schema = fetch_schema()
+    # Optional table filter from env
+    allowed_tables = {t for t in getattr(settings, 'index_tables', ['*']) if t != '*'}
     # Validation of explicit list
     if raw and raw != ["*"] and not (len(raw) == 1 and raw[0] == ""):
         valid: list[str] = []
@@ -102,6 +104,10 @@ def resolve_index_columns() -> list[str]:
                 missing.append(spec)
                 continue
             t, c = spec.split('.', 1)
+            if allowed_tables and t not in allowed_tables:
+                # skip columns not in allowed tables list
+                missing.append(spec)
+                continue
             if t in schema_tables and c in schema_tables[t]:
                 valid.append(spec)
             else:
@@ -116,6 +122,8 @@ def resolve_index_columns() -> list[str]:
         return []
     cols: list[str] = []
     for table, column_list in schema.items():
+        if allowed_tables and table not in allowed_tables:
+            continue
         for c in column_list:
             if c["type"].lower() in settings.text_types:
                 cols.append(f"{table}.{c['name']}")
