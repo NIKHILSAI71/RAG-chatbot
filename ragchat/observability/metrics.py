@@ -24,7 +24,7 @@ __all__ = [
     "init_metrics",
     "EMBED_CACHE_HIT", "EMBED_CACHE_MISS", "EMBED_BATCH_SECONDS", "EMBED_ERRORS",
     "VECTOR_SEARCH_SECONDS", "VECTOR_SEARCH_ERRORS", "CB_OPEN", "with_circuit_breaker",
-    "CHAT_LATENCY_SECONDS", "INDEX_UPDATE_SECONDS"
+    "CHAT_LATENCY_SECONDS", "INDEX_UPDATE_SECONDS", "RATE_LIMIT_BLOCKS", "BUSY_REJECTS", "CHAT_INFLIGHT"
 ]
 
 _metrics_inited = False
@@ -38,6 +38,9 @@ VECTOR_SEARCH_ERRORS: Counter
 CB_OPEN: Gauge
 CHAT_LATENCY_SECONDS: Histogram
 INDEX_UPDATE_SECONDS: Histogram
+RATE_LIMIT_BLOCKS: Counter
+BUSY_REJECTS: Counter
+CHAT_INFLIGHT: Gauge
 
 # Provide placeholder assignments so symbols exist for from-import callers
 EMBED_CACHE_HIT = None  # type: ignore
@@ -49,6 +52,9 @@ VECTOR_SEARCH_ERRORS = None  # type: ignore
 CB_OPEN = None  # type: ignore
 CHAT_LATENCY_SECONDS = None  # type: ignore
 INDEX_UPDATE_SECONDS = None  # type: ignore
+RATE_LIMIT_BLOCKS = None  # type: ignore
+BUSY_REJECTS = None  # type: ignore
+CHAT_INFLIGHT = None  # type: ignore
 
 # Circuit breaker state (shared for embeddings and search but keyed by name)
 _cb_state: dict[str, dict[str, Any]] = {}
@@ -80,6 +86,9 @@ def init_metrics():
         "index_update_seconds", "Incremental index/update job duration seconds",
         buckets=_job_buckets()
     )
+    RATE_LIMIT_BLOCKS = Counter("rate_limit_block_total", "Requests blocked by per-IP rate limiter")
+    BUSY_REJECTS = Counter("busy_reject_total", "Requests rejected due to server busy/concurrency limit")
+    CHAT_INFLIGHT = Gauge("chat_inflight", "Current in-flight chat requests")
     _metrics_inited = True
 
 
