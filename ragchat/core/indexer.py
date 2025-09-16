@@ -231,6 +231,7 @@ def incremental_update(vs: VectorStore, tables: list[str] | None = None) -> dict
     reembedded_rows = 0
     skipped_rows = 0
     deleted_vectors = 0
+    deleted_rows = 0
     new_meta: list[dict[str, Any]] = []  # we rebuild vs.meta for target tables we touch; others preserved
 
     # We keep untouched metas first
@@ -239,9 +240,11 @@ def incremental_update(vs: VectorStore, tables: list[str] | None = None) -> dict
 
     for table in target_tables:
         rows = _collect_table_rows(table)
+        current_pks: set[Any] = set()
         # Map pk-> (original_text, chunks)
         for row in rows:
             pk = row["pk"]
+            current_pks.add(pk)
             text_full = row["text"]
             touched_keys.add((table, pk))
             existing = existing_rows.get((table, pk))
@@ -298,6 +301,18 @@ def incremental_update(vs: VectorStore, tables: list[str] | None = None) -> dict
             added_vectors += len(row_texts)
             reembedded_rows += 1
 
+        # Handle deletions: any (table, pk) that existed but is not in current snapshot
+        existing_pks = {k[1] for k in existing_rows.keys() if k[0] == table}
+        to_delete = existing_pks - current_pks
+        for pk in to_delete:
+            try:
+                vs.delete_row(table, pk)
+            except Exception:
+                pass
+            touched_keys.add((table, pk))
+            deleted_vectors += len(existing_rows.get((table, pk), []) or [])
+            deleted_rows += 1
+
     # Preserve metas for tables not touched
     for m in vs.meta:
         key = (m.get("table"), m.get("pk"))
@@ -315,6 +330,7 @@ def incremental_update(vs: VectorStore, tables: list[str] | None = None) -> dict
         "reembedded_rows": reembedded_rows,
         "skipped_rows": skipped_rows,
         "deleted_vectors": deleted_vectors,
+        "deleted_rows": deleted_rows,
         "total_meta": len(vs.meta),
         "saved": changed,
     }
