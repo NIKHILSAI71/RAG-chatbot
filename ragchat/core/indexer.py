@@ -203,6 +203,17 @@ def build_index(vs: VectorStore | None = None) -> VectorStore:
     dim = len(vectors[0])
     if vs is None:
         vs = VectorStore(dim)
+    # Purge any existing vectors for these rows to avoid duplicates from prior runs
+    seen_rows: set[tuple[str, Any]] = set()
+    for m in metas:
+        key = (m.get("table"), m.get("pk"))
+        if key in seen_rows:
+            continue
+        seen_rows.add(key)
+        try:
+            vs.delete_row(m.get("table"), m.get("pk"))
+        except Exception:
+            pass
     vs.add(vectors, metas)
     vs.save()
     return vs
