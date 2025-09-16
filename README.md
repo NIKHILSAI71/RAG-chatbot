@@ -41,6 +41,10 @@ INDEX_COLUMNS=content.title,content.description
 # INDEX_COLUMNS=*
 INDEX_AUTO_DISCOVER=true
 
+# Restrict indexing to specific tables (optional)
+# Comma-separated table names; leave as * to include all
+INDEX_TABLES=content,users
+
 # Optional tuning
 CHUNK_CHARS=1200          # Max characters per chunk
 MIN_CHUNK_CHARS=40         # Skip very small fragments
@@ -73,6 +77,8 @@ Discovery logic (when `INDEX_COLUMNS=*` and `INDEX_AUTO_DISCOVER=true`):
 1. Read `INFORMATION_SCHEMA.COLUMNS`
 2. Keep columns whose `DATA_TYPE` ∈ `TEXT_TYPES`
 3. Concatenate row textual columns if `COMBINE_ROW_COLUMNS=true`
+
+If `INDEX_TABLES` is set to a comma-separated list (e.g., `posts,comments`), both indexing and retrieval will only consider those tables.
 
 ## Chat
 ```powershell
