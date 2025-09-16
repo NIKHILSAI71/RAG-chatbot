@@ -71,6 +71,7 @@ def fetch_rows_all_text_columns(table: str, limit: int) -> Iterable[dict]:
     for row in rows:
         pk_val = row.get(pk)
         parts = []
+        used_cols: list[str] = []
         for c in text_cols:
             val = row.get(c)
             if val is None:
@@ -82,11 +83,12 @@ def fetch_rows_all_text_columns(table: str, limit: int) -> Iterable[dict]:
                 parts.append(f"{c}: {sval}")
             else:
                 parts.append(sval)
+            used_cols.append(c)
         if not parts:
             continue
         # include raw column values for temporal/status enrichment (per-row)
         raw_cols = {c: row.get(c) for c in (text_cols + temporal_only)}
-        yield {"pk": pk_val, "text": " \n ".join(parts), "table": table, "column": "*", "raw_cols": raw_cols}
+        yield {"pk": pk_val, "text": " \n ".join(parts), "table": table, "column": "*", "raw_cols": raw_cols, "columns": used_cols}
 
 
 def resolve_index_columns() -> list[str]:
@@ -147,6 +149,7 @@ def build_index(vs: VectorStore | None = None) -> VectorStore:
             if table in tables_seen:
                 continue
             for row in fetch_rows_all_text_columns(table, settings.index_row_limit):
+                chunk_idx = 0
                 for ch in chunk_text(row["text"]):
                     if len(ch) < settings.min_chunk_chars:
                         continue
@@ -163,11 +166,16 @@ def build_index(vs: VectorStore | None = None) -> VectorStore:
                         "column": row["column"],
                         "chunk": ch,
                         "indexed_at": now_ts,
+                        "doc_name": f"{row['table']}::{row['pk']}",
+                        "columns": row.get("columns", []),
+                        "id": f"{row['table']}::{row['pk']}::{chunk_idx}",
                         **({"temporal": temporal_meta} if temporal_meta else {})
                     })
+                    chunk_idx += 1
             tables_seen.add(table)
         else:
             for row in fetch_rows(table, col, settings.index_row_limit):
+                chunk_idx = 0
                 for ch in chunk_text(row["text"]):
                     if len(ch) < settings.min_chunk_chars:
                         continue
@@ -183,8 +191,12 @@ def build_index(vs: VectorStore | None = None) -> VectorStore:
                         "column": row["column"],
                         "chunk": ch,
                         "indexed_at": now_ts,
+                        "doc_name": f"{row['table']}::{row['pk']}",
+                        "columns": [col],
+                        "id": f"{row['table']}::{row['pk']}::{chunk_idx}",
                         **({"temporal": temporal_meta} if temporal_meta else {})
                     })
+                    chunk_idx += 1
     if not texts:
         raise RuntimeError("No texts collected for indexing.")
     vectors = embed_texts(texts)
@@ -264,9 +276,53 @@ def incremental_update(vs: VectorStore, tables: list[str] | None = None) -> dict
                 prev_fp = _row_fingerprint(prev_chunks)
             new_fp = _row_fingerprint([text_full])
             if prev_fp == new_fp:
-                # Keep existing metas unchanged
-                new_meta.extend(existing)
-                skipped_rows += 1
+                # Legacy compaction: if existing metas have no deterministic IDs or duplicate chunks, rebuild
+                prev_chunks = [m.get("chunk", "") for m in existing] if existing else []
+                has_id = all(m.get("id") for m in existing) if existing else True
+                has_dupes = len(prev_chunks) != len(set(prev_chunks)) if prev_chunks else False
+                if existing and (not has_id or has_dupes):
+                    try:
+                        vs.delete_row(table, pk)
+                    except Exception:
+                        pass
+                    # force reindex this unchanged row to compact duplicates
+                    row_texts: list[str] = []
+                    row_metas: list[dict[str, Any]] = []
+                    chunk_idx = 0
+                    for ch in chunk_text(text_full):
+                        if len(ch) < settings.min_chunk_chars:
+                            continue
+                        row_texts.append(ch)
+                        temporal_meta = {}
+                        cols_meta = fetch_schema().get(table, [])
+                        for c in cols_meta:
+                            if c["type"].lower() in {"date","datetime","timestamp","time","year"} and c["name"] in row.get("raw_cols", {}):
+                                temporal_meta[c["name"]] = row["raw_cols"][c["name"]]
+                        row_metas.append({
+                            "table": table,
+                            "pk": pk,
+                            "column": row["column"],
+                            "chunk": ch,
+                            "indexed_at": int(time.time()),
+                            "id": f"{table}::{pk}::{chunk_idx}",
+                            "doc_name": f"{table}::{pk}",
+                            "columns": row.get("columns", []),
+                            **({"temporal": temporal_meta} if temporal_meta else {})
+                        })
+                        chunk_idx += 1
+                    if row_texts:
+                        vecs = embed_texts(row_texts)
+                        vs.add(vecs, row_metas)
+                        new_meta.extend(row_metas)
+                        added_vectors += len(row_texts)
+                        reembedded_rows += 1
+                    else:
+                        # nothing to add; keep empty
+                        pass
+                else:
+                    # Keep existing metas unchanged
+                    new_meta.extend(existing)
+                    skipped_rows += 1
                 continue
             # Delete old vectors for this row
             if existing:
@@ -298,6 +354,8 @@ def incremental_update(vs: VectorStore, tables: list[str] | None = None) -> dict
                     "indexed_at": int(time.time()),
                     # deterministic id
                     "id": f"{table}::{pk}::{chunk_idx}",
+                    "doc_name": f"{table}::{pk}",
+                    "columns": row.get("columns", []),
                     **({"temporal": temporal_meta} if temporal_meta else {})
                 })
                 chunk_idx += 1
