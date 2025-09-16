@@ -39,15 +39,16 @@ class MySQLDataSource:
         self._schema_last_load: float | None = None
         self._SCHEMA_TTL_SECONDS = 60.0
 
-    def init(self, min_size: int = 1, max_size: int = 8):
+    def init(self, min_size: int = 1, max_size: int | None = None):
         if pooling is None:
             raise RuntimeError("mysql-connector not installed; required for MySQL datasource")
         with self._pool_lock:
             if self._pool is None:
                 try:
+                    pool_size = max_size or getattr(settings, 'mysql_pool_size', 8)
                     self._pool = pooling.MySQLConnectionPool(
                         pool_name="rag_pool",
-                        pool_size=max_size,
+                        pool_size=pool_size,
                         host=settings.mysql_host,
                         user=settings.mysql_user,
                         password=settings.mysql_password,
@@ -70,7 +71,7 @@ class MySQLDataSource:
                             # retry pool creation
                             self._pool = pooling.MySQLConnectionPool(
                                 pool_name="rag_pool",
-                                pool_size=max_size,
+                                pool_size=pool_size,
                                 host=settings.mysql_host,
                                 user=settings.mysql_user,
                                 password=settings.mysql_password,
