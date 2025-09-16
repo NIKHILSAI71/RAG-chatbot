@@ -1,7 +1,7 @@
 from __future__ import annotations
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
-from threading import Event, Thread
+from threading import Event, Thread, Semaphore, Lock
 import time
 import logging
 import sys
@@ -12,7 +12,14 @@ from ragchat.core.retrieval import set_vector_store
 from ragchat.core.retrieval import _get_text_columns  # type: ignore
 from ragchat.core.chat import chat_once
 from ragchat.core.config import settings
-from ragchat.observability.metrics import init_metrics, CHAT_LATENCY_SECONDS, INDEX_UPDATE_SECONDS
+from ragchat.observability.metrics import (
+    init_metrics,
+    CHAT_LATENCY_SECONDS,
+    INDEX_UPDATE_SECONDS,
+    RATE_LIMIT_BLOCKS,
+    BUSY_REJECTS,
+    CHAT_INFLIGHT,
+)
 from ragchat.observability.tracing import init_tracing
 
 # Configure logging
@@ -53,6 +60,31 @@ _vs: VectorStore | None = None
 _index_worker_stop: Event | None = None
 _index_worker_thread: Thread | None = None
 _last_index_stats: dict | None = None
+_chat_semaphore: Semaphore | None = None
+
+# Simple in-process token bucket per IP for rate limiting
+_rate_state: dict[str, dict[str, float]] = {}
+_rate_lock: Lock = Lock()
+
+
+def _allow_request(ip: str) -> bool:
+    if not settings.enable_rate_limit or settings.rate_limit_rps <= 0:
+        return True
+    import time
+    now = time.time()
+    with _rate_lock:
+        st = _rate_state.get(ip)
+        if st is None:
+            st = {"tokens": float(settings.rate_limit_burst), "last": now}
+            _rate_state[ip] = st
+        # refill
+        elapsed = max(0.0, now - st["last"])
+        st["tokens"] = min(float(settings.rate_limit_burst), st["tokens"] + elapsed * settings.rate_limit_rps)
+        st["last"] = now
+        if st["tokens"] >= 1.0:
+            st["tokens"] -= 1.0
+            return True
+        return False
 
 
 class ChatRequest(BaseModel):
@@ -98,6 +130,10 @@ async def startup_event():
     global _vs, _index_worker_stop, _index_worker_thread
     logger.info("Starting RAG chatbot application...")
     init_pool()
+    # init concurrency limiter
+    from ragchat.core.config import settings as _s
+    if _s.chat_max_concurrency and _s.chat_max_concurrency > 0:
+        globals()["_chat_semaphore"] = Semaphore(_s.chat_max_concurrency)
     existing = VectorStore.load()
     if existing:
         _vs = existing
@@ -173,19 +209,47 @@ async def health():
 # Manual reindex endpoint removed: indexing is automatic via background worker.
 
 @app.post("/chat")
-async def chat(req: ChatRequest):
+def chat(req: ChatRequest, request: Request):
+    # Per-IP rate limiting
+    ip = request.client.host if request and request.client else "unknown"
+    if not _allow_request(ip):
+        if settings.metrics_enabled:
+            init_metrics(); RATE_LIMIT_BLOCKS.inc()
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please retry shortly.")
+
     if not req.query.strip():
         logger.warning("Received empty chat query")
         raise HTTPException(400, "Query required")
-    
-    logger.info(f"Processing chat query: {req.query[:100]}...")  # Log first 100 chars
+
+    logger.info(f"Processing chat query: {req.query[:100]}...")
     start = time.time()
-    answer = chat_once(req.query)
+
+    # Concurrency limiter with optional queue timeout
+    sem = globals().get("_chat_semaphore")
+    acquired = False
+    if sem is not None:
+        timeout = max(0.0, settings.chat_queue_timeout_seconds)
+        if timeout == 0:
+            acquired = sem.acquire(blocking=False)
+        else:
+            acquired = sem.acquire(timeout=timeout)
+        if not acquired:
+            if settings.metrics_enabled:
+                init_metrics(); BUSY_REJECTS.inc()
+            raise HTTPException(status_code=429, detail="Server is busy. Please try again.")
+    try:
+        if settings.metrics_enabled:
+            init_metrics(); CHAT_INFLIGHT.inc()
+        answer = chat_once(req.query)
+    finally:
+        if sem is not None and acquired:
+            sem.release()
+        if settings.metrics_enabled:
+            init_metrics(); CHAT_INFLIGHT.dec()
+
     duration = time.time() - start
-    
     if settings.metrics_enabled:
         CHAT_LATENCY_SECONDS.observe(duration)
-    
     logger.info(f"Chat query completed in {duration:.2f}s")
     return {"answer": answer}
 
