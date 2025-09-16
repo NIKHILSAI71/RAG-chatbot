@@ -64,6 +64,16 @@ class Settings:
     status_timezone: str = os.getenv("STATUS_TIMEZONE", "UTC")
     # Return verbose errors to user (for debugging only; do not enable in prod)
     debug_errors: bool = os.getenv("DEBUG_ERRORS", "false").lower() in {"1","true","yes"}
+    # MySQL connection pool size
+    mysql_pool_size: int = int(os.getenv("MYSQL_POOL_SIZE", "16"))
+    # Chat concurrency limiter per-process (threads); 0 disables limiting
+    chat_max_concurrency: int = int(os.getenv("CHAT_MAX_CONCURRENCY", "8"))
+    # How long a request may wait for a slot before rejection (seconds)
+    chat_queue_timeout_seconds: float = float(os.getenv("CHAT_QUEUE_TIMEOUT_SECONDS", "2.0"))
+    # Simple per-IP token-bucket rate limiting; set RATE_LIMIT_RPS=0 to disable
+    enable_rate_limit: bool = os.getenv("ENABLE_RATE_LIMIT", "true").lower() in {"1","true","yes"}
+    rate_limit_rps: float = float(os.getenv("RATE_LIMIT_RPS", "2"))
+    rate_limit_burst: int = int(os.getenv("RATE_LIMIT_BURST", "10"))
 
 settings = Settings()
 
