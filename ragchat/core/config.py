@@ -21,6 +21,9 @@ class Settings:
         "INDEX_COLUMNS", "*"
     ).split(',') if c])
     index_auto_discover: bool = os.getenv("INDEX_AUTO_DISCOVER", "true").lower() in {"1","true","yes"}
+    index_tables: list[str] = field(default_factory=lambda: [t.strip() for t in os.getenv(
+        "INDEX_TABLES", "*"
+    ).split(',') if t.strip()])
     min_chunk_chars: int = int(os.getenv("MIN_CHUNK_CHARS", "8"))
     chunk_chars: int = int(os.getenv("CHUNK_CHARS", "1200"))
     text_types: list[str] = field(default_factory=lambda: [t.strip().lower() for t in os.getenv(
