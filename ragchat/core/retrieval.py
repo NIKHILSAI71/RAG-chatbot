@@ -22,8 +22,11 @@ def _get_text_columns() -> dict[str, list[str]]:
     if _text_columns_cache is not None:
         return _text_columns_cache
     schema = fetch_schema()
+    allowed_tables = {t for t in getattr(settings, 'index_tables', ['*']) if t != '*'}
     out: dict[str, list[str]] = {}
     for table, cols in schema.items():
+        if allowed_tables and table not in allowed_tables:
+            continue
         txt = [c["name"] for c in cols if c["type"].lower() in settings.text_types][:4]
         if txt:
             out[table] = txt
