@@ -26,8 +26,9 @@ class Settings:
     ).split(',') if t.strip()])
     min_chunk_chars: int = int(os.getenv("MIN_CHUNK_CHARS", "8"))
     chunk_chars: int = int(os.getenv("CHUNK_CHARS", "1200"))
+    # Only true text-like types by default to avoid reindex churn
     text_types: list[str] = field(default_factory=lambda: [t.strip().lower() for t in os.getenv(
-        "TEXT_TYPES", "char,varchar,text,mediumtext,longtext,json,date,datetime,time,timestamp,year"
+        "TEXT_TYPES", "char,varchar,text,mediumtext,longtext,json"
     ).split(',') if t.strip()])
     combine_row_columns: bool = os.getenv("COMBINE_ROW_COLUMNS", "true").lower() in {"1","true","yes"}
     include_column_names: bool = os.getenv("INCLUDE_COLUMN_NAMES", "false").lower() in {"1","true","yes"}
@@ -77,6 +78,12 @@ class Settings:
     enable_rate_limit: bool = os.getenv("ENABLE_RATE_LIMIT", "true").lower() in {"1","true","yes"}
     rate_limit_rps: float = float(os.getenv("RATE_LIMIT_RPS", "2"))
     rate_limit_burst: int = int(os.getenv("RATE_LIMIT_BURST", "10"))
+    # Index maintenance safety: skip deleting rows not seen in snapshot unless explicitly enabled
+    delete_missing: bool = os.getenv("INDEX_DELETE_MISSING", "false").lower() in {"1","true","yes"}
+    # Extra columns to include in fingerprint comparisons (by name patterns)
+    fingerprint_include_patterns: list[str] = field(default_factory=lambda: [p.strip() for p in os.getenv(
+        "FINGERPRINT_INCLUDE_PATTERNS", ""
+    ).split(',') if p.strip()])
 
 settings = Settings()
 
