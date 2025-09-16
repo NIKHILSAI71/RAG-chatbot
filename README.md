@@ -67,7 +67,7 @@ ALTER TABLE content ADD FULLTEXT ft_content (title, description);
 
 ## Indexing
 Startup attempts to load existing Pinecone index metadata from `data/meta.json`.
-If missing and `AUTO_INDEX=true`, it performs an initial build. A lightweight background worker then runs `incremental_update` every `AUTO_INDEX_INTERVAL` seconds, only re‑embedding changed rows and persisting when deltas exist.
+If missing and `AUTO_INDEX=true`, it performs an initial build. A lightweight background worker then runs `incremental_update` every `AUTO_INDEX_INTERVAL` seconds, only re‑embedding changed rows and persisting when deltas exist. It also detects rows deleted from the source tables and removes their vectors from Pinecone.
 
 Discovery logic (when `INDEX_COLUMNS=*` and `INDEX_AUTO_DISCOVER=true`):
 1. Read `INFORMATION_SCHEMA.COLUMNS`
@@ -158,3 +158,23 @@ Production hardening suggestions:
 
 ## License
 Internal / example use only (add license if distributing).
+
+## Scaling & Concurrency
+To support thousands of members with modest concurrent chats, run multiple workers and tune pools:
+
+```powershell
+# Increase DB pool and per-process chat concurrency
+$env:MYSQL_POOL_SIZE = "32"
+$env:CHAT_MAX_CONCURRENCY = "8"
+$env:CHAT_QUEUE_TIMEOUT_SECONDS = "2.0"
+
+# Rate limit to protect upstreams (per IP)
+$env:ENABLE_RATE_LIMIT = "true"
+$env:RATE_LIMIT_RPS = "2"
+$env:RATE_LIMIT_BURST = "10"
+
+# Start with 4 workers
+uvicorn ragchat.app:app --workers 4
+```
+
+Enable metrics and watch latency and rejections at `/metrics` when `METRICS_ENABLED=true`.
