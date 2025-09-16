@@ -149,6 +149,7 @@ def build_index(vs: VectorStore | None = None) -> VectorStore:
             if table in tables_seen:
                 continue
             for row in fetch_rows_all_text_columns(table, settings.index_row_limit):
+                row_fp = _compute_row_fp(row["text"], row.get("raw_cols"))
                 chunk_idx = 0
                 for ch in chunk_text(row["text"]):
                     if len(ch) < settings.min_chunk_chars:
@@ -169,12 +170,15 @@ def build_index(vs: VectorStore | None = None) -> VectorStore:
                         "doc_name": f"{row['table']}::{row['pk']}",
                         "columns": row.get("columns", []),
                         "id": f"{row['table']}::{row['pk']}::{chunk_idx}",
+                        "row_fp": row_fp,
                         **({"temporal": temporal_meta} if temporal_meta else {})
                     })
                     chunk_idx += 1
             tables_seen.add(table)
         else:
             for row in fetch_rows(table, col, settings.index_row_limit):
+                # raw_cols not available in legacy single-column fetch; fallback to text-only fp
+                row_fp = _row_fingerprint([row["text"]])
                 chunk_idx = 0
                 for ch in chunk_text(row["text"]):
                     if len(ch) < settings.min_chunk_chars:
@@ -194,6 +198,7 @@ def build_index(vs: VectorStore | None = None) -> VectorStore:
                         "doc_name": f"{row['table']}::{row['pk']}",
                         "columns": [col],
                         "id": f"{row['table']}::{row['pk']}::{chunk_idx}",
+                        "row_fp": row_fp,
                         **({"temporal": temporal_meta} if temporal_meta else {})
                     })
                     chunk_idx += 1
@@ -203,17 +208,10 @@ def build_index(vs: VectorStore | None = None) -> VectorStore:
     dim = len(vectors[0])
     if vs is None:
         vs = VectorStore(dim)
-    # Purge any existing vectors for these rows to avoid duplicates from prior runs
-    seen_rows: set[tuple[str, Any]] = set()
-    for m in metas:
-        key = (m.get("table"), m.get("pk"))
-        if key in seen_rows:
-            continue
-        seen_rows.add(key)
-        try:
-            vs.delete_row(m.get("table"), m.get("pk"))
-        except Exception:
-            pass
+    # Replace local metadata for rows we are (re)building to avoid duplicate meta entries
+    keys_to_replace: set[tuple[str, Any]] = {(m.get("table"), m.get("pk")) for m in metas}
+    if getattr(vs, 'meta', None):
+        vs.meta = [m for m in vs.meta if (m.get("table"), m.get("pk")) not in keys_to_replace]
     vs.add(vectors, metas)
     vs.save()
     return vs
@@ -225,6 +223,28 @@ def _row_fingerprint(parts: Sequence[str]) -> str:
         h.update(p.encode("utf-8", errors="ignore"))
         h.update(b"\x00")
     return h.hexdigest()[:32]
+
+
+def _compute_row_fp(text_full: str, raw_cols: dict[str, Any] | None) -> str:
+    extras: list[str] = []
+    pat_strs = getattr(settings, 'fingerprint_include_patterns', []) or []
+    patterns = []
+    for p in pat_strs:
+        try:
+            patterns.append(re.compile(p, re.IGNORECASE))
+        except Exception:
+            continue
+    if raw_cols and patterns:
+        for k in sorted(raw_cols.keys(), key=lambda s: str(s).lower()):
+            try:
+                if any(p.search(str(k)) for p in patterns):
+                    v = raw_cols.get(k)
+                    if v is None:
+                        continue
+                    extras.append(str(v))
+            except Exception:
+                continue
+    return _row_fingerprint([text_full] + extras)
 
 
 def _collect_table_rows(table: str) -> list[dict[str, Any]]:
@@ -279,61 +299,63 @@ def incremental_update(vs: VectorStore, tables: list[str] | None = None) -> dict
             text_full = row["text"]
             touched_keys.add((table, pk))
             existing = existing_rows.get((table, pk))
-            # Build previous fingerprint if any
+            # Compute previous fingerprint if any
             prev_fp = None
             if existing:
-                # Reconstruct previous combined row text by concatenating chunks (may over-approximate)
-                prev_chunks = [m.get("chunk", "") for m in existing]
-                prev_fp = _row_fingerprint(prev_chunks)
-            new_fp = _row_fingerprint([text_full])
+                # Prefer stored row_fp if present
+                prev_fp = next((m.get("row_fp") for m in existing if m.get("row_fp")), None)
+                if not prev_fp:
+                    # Attempt deterministic reconstruction by sorting by chunk index in id
+                    def _idx_of(m: dict[str, Any]) -> int:
+                        mid = str(m.get("id") or "")
+                        try:
+                            return int(mid.rsplit("::", 1)[-1])
+                        except Exception:
+                            return 0
+                    prev_chunks_sorted = [m.get("chunk", "") for m in sorted(existing, key=_idx_of)]
+                    prev_fp = _row_fingerprint(["".join(prev_chunks_sorted)])
+            new_fp = _compute_row_fp(text_full, row.get("raw_cols"))
             if prev_fp == new_fp:
-                # Legacy compaction: if existing metas have no deterministic IDs or duplicate chunks, rebuild
-                prev_chunks = [m.get("chunk", "") for m in existing] if existing else []
-                has_id = all(m.get("id") for m in existing) if existing else True
-                has_dupes = len(prev_chunks) != len(set(prev_chunks)) if prev_chunks else False
-                if existing and (not has_id or has_dupes):
-                    try:
-                        vs.delete_row(table, pk)
-                    except Exception:
-                        pass
-                    # force reindex this unchanged row to compact duplicates
-                    row_texts: list[str] = []
-                    row_metas: list[dict[str, Any]] = []
-                    chunk_idx = 0
-                    for ch in chunk_text(text_full):
-                        if len(ch) < settings.min_chunk_chars:
-                            continue
-                        row_texts.append(ch)
-                        temporal_meta = {}
-                        cols_meta = fetch_schema().get(table, [])
-                        for c in cols_meta:
-                            if c["type"].lower() in {"date","datetime","timestamp","time","year"} and c["name"] in row.get("raw_cols", {}):
-                                temporal_meta[c["name"]] = row["raw_cols"][c["name"]]
-                        row_metas.append({
-                            "table": table,
-                            "pk": pk,
-                            "column": row["column"],
-                            "chunk": ch,
-                            "indexed_at": int(time.time()),
-                            "id": f"{table}::{pk}::{chunk_idx}",
-                            "doc_name": f"{table}::{pk}",
-                            "columns": row.get("columns", []),
-                            **({"temporal": temporal_meta} if temporal_meta else {})
-                        })
-                        chunk_idx += 1
-                    if row_texts:
-                        vecs = embed_texts(row_texts)
-                        vs.add(vecs, row_metas)
-                        new_meta.extend(row_metas)
-                        added_vectors += len(row_texts)
-                        reembedded_rows += 1
-                    else:
-                        # nothing to add; keep empty
-                        pass
-                else:
-                    # Keep existing metas unchanged
-                    new_meta.extend(existing)
-                    skipped_rows += 1
+                # Unchanged: compact duplicates and keep existing metas; set row_fp
+                if existing:
+                    by_chunk: dict[str, list[dict[str, Any]] ] = {}
+                    for m in existing:
+                        by_chunk.setdefault(m.get("chunk", ""), []).append(m)
+                    ids_to_delete: list[str] = []
+                    kept: list[dict[str, Any]] = []
+                    prefix = f"{table}::{pk}::"
+                    for ch_txt, group in by_chunk.items():
+                        # Prefer deterministic ID form; else keep first
+                        primary = None
+                        for g in group:
+                            gid = str(g.get("id") or "")
+                            if gid.startswith(prefix):
+                                primary = g
+                                break
+                        if primary is None:
+                            primary = group[0]
+                        # mark others for deletion
+                        for g in group:
+                            if g is primary:
+                                continue
+                            gid = g.get("id")
+                            if gid:
+                                ids_to_delete.append(gid)
+                        # ensure row_fp present
+                        if primary.get("row_fp") != new_fp:
+                            p2 = dict(primary)
+                            p2["row_fp"] = new_fp
+                            kept.append(p2)
+                        else:
+                            kept.append(primary)
+                    if ids_to_delete:
+                        try:
+                            vs.delete_ids(ids_to_delete)
+                        except Exception:
+                            pass
+                        deleted_vectors += len(ids_to_delete)
+                    new_meta.extend(kept)
+                skipped_rows += 1
                 continue
             # Delete old vectors for this row
             if existing:
@@ -367,6 +389,7 @@ def incremental_update(vs: VectorStore, tables: list[str] | None = None) -> dict
                     "id": f"{table}::{pk}::{chunk_idx}",
                     "doc_name": f"{table}::{pk}",
                     "columns": row.get("columns", []),
+                    "row_fp": new_fp,
                     **({"temporal": temporal_meta} if temporal_meta else {})
                 })
                 chunk_idx += 1
@@ -378,17 +401,18 @@ def incremental_update(vs: VectorStore, tables: list[str] | None = None) -> dict
             added_vectors += len(row_texts)
             reembedded_rows += 1
 
-        # Handle deletions: any (table, pk) that existed but is not in current snapshot
-        existing_pks = {k[1] for k in existing_rows.keys() if k[0] == table}
-        to_delete = existing_pks - current_pks
-        for pk in to_delete:
-            try:
-                vs.delete_row(table, pk)
-            except Exception:
-                pass
-            touched_keys.add((table, pk))
-            deleted_vectors += len(existing_rows.get((table, pk), []) or [])
-            deleted_rows += 1
+        # Handle deletions only if explicitly enabled
+        if getattr(settings, 'delete_missing', False):
+            existing_pks = {k[1] for k in existing_rows.keys() if k[0] == table}
+            to_delete = existing_pks - current_pks
+            for pk in to_delete:
+                try:
+                    vs.delete_row(table, pk)
+                except Exception:
+                    pass
+                touched_keys.add((table, pk))
+                deleted_vectors += len(existing_rows.get((table, pk), []) or [])
+                deleted_rows += 1
 
     # Preserve metas for tables not touched
     for m in vs.meta:
