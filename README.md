@@ -80,6 +80,14 @@ Discovery logic (when `INDEX_COLUMNS=*` and `INDEX_AUTO_DISCOVER=true`):
 
 If `INDEX_TABLES` is set to a comma-separated list (e.g., `posts,comments`), both indexing and retrieval will only consider those tables.
 
+### Deduplication and IDs
+- Each row is chunked deterministically and upserted with ID: `table::pk::chunkIndex`.
+- If no ID is provided, the vector store falls back to a stable hash of the chunk to avoid duplicates.
+- Re-running indexing will not create duplicates. The system also compacts legacy entries without IDs.
+
+Metadata stored per vector includes:
+- `table`, `pk`, `doc_name` (=`table::pk`), `columns` (text columns used), `chunk`, `indexed_at`, and optional `temporal` fields.
+
 ## Chat
 ```powershell
 curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"query":"Explain the recent events"}'
